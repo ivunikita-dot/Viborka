@@ -167,50 +167,137 @@ def main():
     print('Читаю исходный файл:', source_path)
     df_src, header_present = read_source_with_better_header_detection(source_path)
 
-    mode = args.mode
-    if mode == 'auto':
-        hdrs = [str(h).lower() for h in df_src.columns]
-        if any('фио' in h or 'fio' in h for h in hdrs):
-            mode = 'single'
-        elif df_src.shape[1] >= 3:
-            mode = 'three'
-        else:
-            mode = 'single'
-        print('Auto mode detected:', mode)
+   def column_is_name_token(v):
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    # одно «слово» (только буквы/дефис)
+    return bool(re.match(r'^[A-Za-zА-Яа-яЁё\-]+$', s))
 
-    entries = []
-    if mode == 'three':
-        cols = args.cols if args.cols else list(df_src.columns[:3])
-        for idx, row in df_src.iterrows():
-            vals = []
-            for c in cols:
-                v = row.get(c, '') if c in df_src.columns else ''
-                if pd.isna(v): v = ''
-                vals.append(str(v).strip())
-            full = ' '.join([p for p in vals if p])
-            norm = normalize_text(full)
-            entries.append((vals, norm))
-        out_columns = list(cols) + ['Найдено в файлах'] if header_present else ['Фамилия','Имя','Отчество','Найдено в файлах']
+def column_looks_like_fullname(v):
+    if v is None:
+        return False
+    s = str(v).strip()
+    if not s:
+        return False
+    # 2..4 слова, каждое — буквы/дефис
+    parts = s.split()
+    if len(parts) < 2 or len(parts) > 4:
+        return False
+    for p in parts:
+        if not re.match(r'^[A-Za-zА-Яа-яЁё\-]+$', p):
+            return False
+    return True
+
+def detect_mode_and_columns(df, args):
+    # Если пользователь явно указал режим — используем его
+    if args.mode != 'auto':
+        return args.mode, None
+
+    nrows = max(1, len(df))
+    # 1) Проверим: есть ли колонка с большим количеством полных ФИО (single)
+    single_counts = []
+    for col in df.columns:
+        cnt = 0
+        for v in df[col].head(200):  # ограничиваемся первыми 200 строк для скорости
+            if column_looks_like_fullname(v):
+                cnt += 1
+        single_counts.append(cnt)
+    best_single = max(single_counts) if single_counts else 0
+    # доля строк где колонка выглядит как ФИО
+    single_frac = best_single / min(nrows, 200)
+
+    # 2) Проверим: есть ли три соседних колонки, где каждое поле похоже на отдельное имя
+    three_best = (None, 0)  # (start_col_index, count)
+    cols = list(df.columns)
+    for i in range(max(0, len(cols) - 3 + 1)):
+        cnt = 0
+        for r in range(min(nrows, 200)):
+            try:
+                v1 = df.iloc[r, i]
+                v2 = df.iloc[r, i+1]
+                v3 = df.iloc[r, i+2]
+            except Exception:
+                continue
+            if column_is_name_token(v1) and column_is_name_token(v2) and column_is_name_token(v3):
+                cnt += 1
+        if cnt > three_best[1]:
+            three_best = (i, cnt)
+    three_frac = three_best[1] / min(nrows, 200)
+
+    # Правила выбора (порог можно менять)
+    # Если доля full-name в одной колонке > 0.25 -> single
+    # Иначе если доля трёх колонок > 0.25 -> three
+    # Иначе fallback: если df.columns >=3 -> three, иначе single
+    if single_frac >= 0.25:
+        return 'single', None
+    if three_frac >= 0.25:
+        start = three_best[0]
+        # вернуть имена колонок (если имена существуют) или индексы
+        if start is not None:
+            return 'three', cols[start:start+3]
+    if df.shape[1] >= 3:
+        return 'three', list(df.columns[:3])
+    return 'single', None
+
+# Применяем детектор
+mode_detected, detected_cols = detect_mode_and_columns(df_src, args)
+mode = mode_detected
+print('Detected mode:', mode, 'detected_cols:', detected_cols)
+
+# Формируем entries одинаково как раньше, но с поддержкой detected_cols
+entries = []
+if mode == 'three':
+    if args.cols:
+        cols = args.cols
+    elif detected_cols:
+        cols = detected_cols
     else:
-        chosen_col_name = None
-        if args.col_index is not None:
-            chosen_col_name = df_src.columns[args.col_index]
-        elif args.col_name:
-            chosen_col_name = args.col_name
-        else:
-            hdrs = [str(h).lower() for h in df_src.columns]
-            found = None
-            for i,h in enumerate(hdrs):
-                if 'фио' in h or 'fio' in h:
-                    found = i; break
-            chosen_col_name = df_src.columns[found] if found is not None else df_src.columns[0]
-        for idx, row in df_src.iterrows():
-            v = row.get(chosen_col_name, '')
+        cols = list(df_src.columns[:3])
+    for idx, row in df_src.iterrows():
+        vals = []
+        for c in cols:
+            # поддерживаем как именованные колонки, так и индексы
+            if isinstance(c, int):
+                try:
+                    v = row.iloc[c]
+                except Exception:
+                    v = ''
+            else:
+                v = row.get(c, '') if c in df_src.columns else ''
             if pd.isna(v): v = ''
-            s = str(v).strip()
-            norm = normalize_text(s)
-            entries.append((s, norm))
-        out_columns = [chosen_col_name, 'Найдено в файлах'] if header_present else ['ФИО','Найдено в файлах']
+            vals.append(str(v).strip())
+        full = ' '.join([p for p in vals if p])
+        norm = normalize_text(full)
+        entries.append((vals, norm))
+    out_columns = list(cols) + ['Найдено в файлах'] if df_src.shape[0] and any(isinstance(h, str) for h in df_src.columns) else ['Фамилия','Имя','Отчество','Найдено в файлах']
+else:
+    # single
+    chosen_col_name = None
+    if args.col_index is not None:
+        chosen_col_name = df_src.columns[args.col_index]
+    elif args.col_name:
+        chosen_col_name = args.col_name
+    else:
+        chosen_col_name = None  # пусть детектор выберет
+    if chosen_col_name is None:
+        # найдём наиболее вероятную колонку с ФИО (по column_looks_like_fullname)
+        best_col = None
+        best_cnt = -1
+        for col in df_src.columns:
+            cnt = sum(1 for v in df_src[col].head(200) if column_looks_like_fullname(v))
+            if cnt > best_cnt:
+                best_cnt = cnt; best_col = col
+        chosen_col_name = best_col if best_col is not None else df_src.columns[0]
+    for idx, row in df_src.iterrows():
+        v = row.get(chosen_col_name, '') if chosen_col_name in df_src.columns else ''
+        if pd.isna(v): v = ''
+        s = str(v).strip()
+        norm = normalize_text(s)
+        entries.append((s, norm))
+    out_columns = [chosen_col_name, 'Найдено в файлах'] if df_src.shape[0] and any(isinstance(h, str) for h in df_src.columns) else ['ФИО','Найдено в файлах']
 
     target_set = set([e[1] for e in entries if e[1]])
     if not target_set:
