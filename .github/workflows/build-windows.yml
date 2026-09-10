@@ -34,5 +34,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-выборка
-          path: dist/выборка.exe
+          name: dist-vyborka
+          path: dist/vyborka.exe

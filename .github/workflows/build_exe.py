@@ -1,6 +1,21 @@
 import os
 import sys
 
+# Ensure stdout/stderr can print Unicode on Windows runners (cp1252 default)
+try:
+    # Python 3.7+ supports reconfigure
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    # Fallback
+    try:
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except Exception:
+        pass
+
+
 def find_tcltk():
     try:
         import tkinter
@@ -27,7 +42,8 @@ def main():
         print('Error: source script not found:', script, file=sys.stderr)
         sys.exit(1)
 
-    args = ['--noconfirm', '--onefile', '--windowed', '--name', 'выборка', script]
+    # Use ASCII name to avoid possible encoding problems in filenames
+    args = ['--noconfirm', '--onefile', '--windowed', '--name', 'vyborka', script]
 
     tcltk = find_tcltk()
     for src, dest in reversed(tcltk):
@@ -50,3 +66,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+'}
