@@ -1,8 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Упрощённая копия скрипта для сборки в репозитории. Убедитесь, что это та же версия,
-которую вы используете. В противном случае замените на свою последнюю версию.
+find_fio_gui_recursive_v5.py
+
+Версия: оптимизированная для случая, когда ФИО в целевых файлах
+встречается только в одной строке (горизонтально). Убрано вертикальное
+сканирование — стало быстрее и однозначнее.
+
+Новые опции:
+  --max-seq-length N   # максимальная длина последовательности соседних ячеек (по умолчанию 3)
+  --min-parts M        # минимальное число слов в объединённой строке, чтобы считать возможным ФИО (по умолчанию 2)
+
+Остальное поведение как в предыдущих версиях (detekciya header, GUI выбор файла/папки,
+рекурсивный поиск по подпапкам и т.д.).
 """
 
 import argparse
@@ -42,7 +52,73 @@ def looks_like_fio_text(s: str) -> bool:
     return True
 
 
+# GUI helpers
+def choose_file_via_gui(title: str = 'Выберите исходный xlsx файл') -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return ''
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    file = filedialog.askopenfilename(title=title, filetypes=[('Excel files', '*.xlsx')])
+    root.destroy()
+    return file
+
+
+def choose_folder_via_gui(title: str = 'Выберите корневую папку для поиска') -> str:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception:
+        return ''
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    d = filedialog.askdirectory(title=title)
+    root.destroy()
+    return d
+
+
+# Console helpers
+def choose_file_console(prompt: str = 'Введите путь к исходному xlsx файлу: ') -> str:
+    s = input(prompt).strip()
+    return s
+
+
+def choose_folder_console(prompt: str = 'Введите путь к корневой папке для поиска: ') -> str:
+    s = input(prompt).strip()
+    return s
+
+
+def collect_xlsx_files(folder: Path, recursive: bool, exclude_paths=None):
+    exclude_paths = set([str(p) for p in (exclude_paths or [])])
+    files = []
+    if recursive:
+        it = folder.rglob('*.xlsx')
+    else:
+        it = folder.glob('*.xlsx')
+    for p in it:
+        try:
+            rp = str(p.resolve())
+        except Exception:
+            rp = str(p)
+        if rp in exclude_paths:
+            continue
+        files.append(p)
+    return files
+
+
 def scan_file_openpyxl_horizontal(path: Path, target_set, max_seq_length=3, min_parts=2):
+    """Сканирует .xlsx файл, ищет target_set только в горизонтальных последовательностях
+    соседних ячеек в одной строке. Возвращает set найденных нормализованных ключей.
+
+    Правила:
+    - рассматриваем последовательности длиной 1..max_seq_length
+    - объединяем непустые части через пробел
+    - перед сравнением проверяем, что объединённая строка содержит >= min_parts слов
+    """
     found = set()
     if load_workbook is None:
         raise RuntimeError('openpyxl не установлен. Установите openpyxl: pip install openpyxl')
@@ -58,6 +134,7 @@ def scan_file_openpyxl_horizontal(path: Path, target_set, max_seq_length=3, min_
             nrows = len(rows)
             ncols = max((len(r) for r in rows), default=0)
             for r_idx, row in enumerate(rows):
+                # normalize row length
                 row_vals = [None] * ncols
                 for c_idx, v in enumerate(row):
                     row_vals[c_idx] = v
@@ -75,6 +152,7 @@ def scan_file_openpyxl_horizontal(path: Path, target_set, max_seq_length=3, min_
                         comb = ' '.join([p for p in parts if p])
                         if not comb:
                             continue
+                        # require minimum words (parts by whitespace) to reduce false positives
                         if len(comb.split()) < min_parts:
                             continue
                         n = normalize_text(comb)
@@ -119,227 +197,207 @@ def read_source_with_better_header_detection(path: Path):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Ищет ФИО среди xlsx-файлов')
+    parser = argparse.ArgumentParser(description='Ищет ФИО среди xlsx-файлов в выбранной корневой папке и подпапках (по умолчанию).')
     parser.add_argument('--mode', choices=['auto', 'three', 'single'], default='auto')
+
     parser.add_argument('--source', '-s', default=None, help='Путь к исходному xlsx с ФИО')
-    parser.add_argument('--folder', '-d', default=None, help='Корневая папка для поиска')
+    parser.add_argument('--folder', '-d', default=None, help='Корневая папка для поиска (будет выполнен рекурсивный поиск по подпапкам по умолчанию)')
+
     parser.add_argument('--cols', '-c', nargs=3, metavar=('Фамилия', 'Имя', 'Отчество'), help='Имена трёх колонок (для three)')
     parser.add_argument('--col-name', default=None, help='Имя колонки с ФИО (для single)')
     parser.add_argument('--col-index', type=int, default=None, help='Индекс колонки (0-based) с ФИО (для single)')
-    parser.add_argument('--no-recursive', dest='recursive', action='store_false', help='Не искать рекурсивно')
+
+    parser.add_argument('--no-recursive', dest='recursive', action='store_false', help='Не искать рекурсивно (только в корневой папке)')
     parser.add_argument('--output', '-o', default='результат_фио.xlsx', help='Имя выходного xlsx файла')
+
     parser.add_argument('--gui', action='store_true', help='Открыть GUI-диалоги для выбора исходного файла и корневой папки')
-    parser.add_argument('--max-seq-length', type=int, default=3, help='Максимальная длина последовательности соседних ячеек')
-    parser.add_argument('--min-parts', type=int, default=2, help='Минимальное число слов в объединённой строке')
+    parser.add_argument('--max-seq-length', type=int, default=3, help='Максимальная длина последовательности соседних ячеек в строке (по умолчанию 3)')
+    parser.add_argument('--min-parts', type=int, default=2, help='Минимальное число слов в объединённой строке для считания возможным ФИО (по умолчанию 2)')
 
     args = parser.parse_args()
 
     use_gui = args.gui or (not any([args.source, args.folder, args.cols, args.col_name, args.col_index]))
 
+    # choose source
     if use_gui:
-        try:
-            import tkinter as tk
-            from tkinter import filedialog
-            root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)
-            src = filedialog.askopenfilename(title='Выберите исходный xlsx файл', filetypes=[('Excel files','*.xlsx')])
-            if not src:
-                print('Исходный файл не выбран. Выход.')
-                return
-            source_path = Path(src)
-            d = filedialog.askdirectory(title='Выберите корневую папку для поиска')
-            if not d:
-                print('Папка не выбрана. Выход.')
-                return
-            search_folder = Path(d)
-        except Exception:
-            print('GUI недоступно. Запустите без --gui или используйте CLI.')
+        src = choose_file_via_gui()
+        if not src:
+            print('Исходный файл не выбран через GUI. Выход.')
             return
+        source_path = Path(src)
     else:
         if args.source:
             source_path = Path(args.source)
         else:
-            source_path = Path(input('Введите путь к исходному xlsx: ').strip())
+            sp = choose_file_console()
+            if not sp:
+                print('Исходный файл не задан. Выход.')
+                return
+            source_path = Path(sp)
+
+    if not source_path.exists():
+        print(f'Исходный файл не найден: {source_path}', file=sys.stderr)
+        return
+
+    # choose root folder
+    if use_gui:
+        folder_selected = choose_folder_via_gui()
+        if not folder_selected:
+            print('Папка не выбрана через GUI. Выход.')
+            return
+        search_folder = Path(folder_selected)
+    else:
         if args.folder:
             search_folder = Path(args.folder)
         else:
-            search_folder = Path(input('Введите путь к папке для поиска: ').strip())
+            sf = choose_folder_console()
+            if not sf:
+                print('Папка для поиска не задана. Выход.')
+                return
+            search_folder = Path(sf)
+
+    if not search_folder.exists() or not search_folder.is_dir():
+        print(f'Папка для поиска не найдена: {search_folder}', file=sys.stderr)
+        return
 
     print('Читаю исходный файл:', source_path)
-    df_src, header_present = read_source_with_better_header_detection(source_path)
+    try:
+        df_src, header_present = read_source_with_better_header_detection(source_path)
+    except Exception as e:
+        print('Ошибка при чтении исходного файла через pandas:', e, file=sys.stderr)
+        return
 
-   def column_is_name_token(v):
-    if v is None:
-        return False
-    s = str(v).strip()
-    if not s:
-        return False
-    # одно «слово» (только буквы/дефис)
-    return bool(re.match(r'^[A-Za-zА-Яа-яЁё\-]+$', s))
-
-def column_looks_like_fullname(v):
-    if v is None:
-        return False
-    s = str(v).strip()
-    if not s:
-        return False
-    # 2..4 слова, каждое — буквы/дефис
-    parts = s.split()
-    if len(parts) < 2 or len(parts) > 4:
-        return False
-    for p in parts:
-        if not re.match(r'^[A-Za-zА-Яа-яЁё\-]+$', p):
-            return False
-    return True
-
-def detect_mode_and_columns(df, args):
-    # Если пользователь явно указал режим — используем его
-    if args.mode != 'auto':
-        return args.mode, None
-
-    nrows = max(1, len(df))
-    # 1) Проверим: есть ли колонка с большим количеством полных ФИО (single)
-    single_counts = []
-    for col in df.columns:
-        cnt = 0
-        for v in df[col].head(200):  # ограничиваемся первыми 200 строк для скорости
-            if column_looks_like_fullname(v):
-                cnt += 1
-        single_counts.append(cnt)
-    best_single = max(single_counts) if single_counts else 0
-    # доля строк где колонка выглядит как ФИО
-    single_frac = best_single / min(nrows, 200)
-
-    # 2) Проверим: есть ли три соседних колонки, где каждое поле похоже на отдельное имя
-    three_best = (None, 0)  # (start_col_index, count)
-    cols = list(df.columns)
-    for i in range(max(0, len(cols) - 3 + 1)):
-        cnt = 0
-        for r in range(min(nrows, 200)):
-            try:
-                v1 = df.iloc[r, i]
-                v2 = df.iloc[r, i+1]
-                v3 = df.iloc[r, i+2]
-            except Exception:
-                continue
-            if column_is_name_token(v1) and column_is_name_token(v2) and column_is_name_token(v3):
-                cnt += 1
-        if cnt > three_best[1]:
-            three_best = (i, cnt)
-    three_frac = three_best[1] / min(nrows, 200)
-
-    # Правила выбора (порог можно менять)
-    # Если доля full-name в одной колонке > 0.25 -> single
-    # Иначе если доля трёх колонок > 0.25 -> three
-    # Иначе fallback: если df.columns >=3 -> three, иначе single
-    if single_frac >= 0.25:
-        return 'single', None
-    if three_frac >= 0.25:
-        start = three_best[0]
-        # вернуть имена колонок (если имена существуют) или индексы
-        if start is not None:
-            return 'three', cols[start:start+3]
-    if df.shape[1] >= 3:
-        return 'three', list(df.columns[:3])
-    return 'single', None
-
-# Применяем детектор
-mode_detected, detected_cols = detect_mode_and_columns(df_src, args)
-mode = mode_detected
-print('Detected mode:', mode, 'detected_cols:', detected_cols)
-
-# Формируем entries одинаково как раньше, но с поддержкой detected_cols
-entries = []
-if mode == 'three':
-    if args.cols:
-        cols = args.cols
-    elif detected_cols:
-        cols = detected_cols
+    mode = args.mode
+    if mode == 'auto':
+        hdrs = [str(h).lower() for h in df_src.columns]
+        if any('фио' in h or 'fio' in h for h in hdrs):
+            mode = 'single'
+        elif df_src.shape[1] >= 3:
+            mode = 'three'
+        else:
+            mode = 'single'
+        print('Auto mode detected:', mode)
     else:
-        cols = list(df_src.columns[:3])
-    for idx, row in df_src.iterrows():
-        vals = []
-        for c in cols:
-            # поддерживаем как именованные колонки, так и индексы
-            if isinstance(c, int):
-                try:
-                    v = row.iloc[c]
-                except Exception:
-                    v = ''
-            else:
+        print('Mode:', mode)
+
+    entries = []
+    if mode == 'three':
+        if args.cols:
+            cols = args.cols
+        else:
+            cols = list(df_src.columns[:3])
+        print('Используем колонки для ФИО:', cols)
+        for idx, row in df_src.iterrows():
+            vals = []
+            for c in cols:
                 v = row.get(c, '') if c in df_src.columns else ''
-            if pd.isna(v): v = ''
-            vals.append(str(v).strip())
-        full = ' '.join([p for p in vals if p])
-        norm = normalize_text(full)
-        entries.append((vals, norm))
-    out_columns = list(cols) + ['Найдено в файлах'] if df_src.shape[0] and any(isinstance(h, str) for h in df_src.columns) else ['Фамилия','Имя','Отчество','Найдено в файлах']
-else:
-    # single
-    chosen_col_name = None
-    if args.col_index is not None:
-        chosen_col_name = df_src.columns[args.col_index]
-    elif args.col_name:
-        chosen_col_name = args.col_name
+                if pd.isna(v):
+                    v = ''
+                vals.append(str(v).strip())
+            full = ' '.join([p for p in vals if p])
+            norm = normalize_text(full)
+            entries.append((vals, norm))
+        if header_present:
+            out_columns = list(cols) + ['Найдено в файлах']
+        else:
+            out_columns = ['Фамилия', 'Имя', 'Отчество', 'Найдено в файлах']
     else:
-        chosen_col_name = None  # пусть детектор выберет
-    if chosen_col_name is None:
-        # найдём наиболее вероятную колонку с ФИО (по column_looks_like_fullname)
-        best_col = None
-        best_cnt = -1
-        for col in df_src.columns:
-            cnt = sum(1 for v in df_src[col].head(200) if column_looks_like_fullname(v))
-            if cnt > best_cnt:
-                best_cnt = cnt; best_col = col
-        chosen_col_name = best_col if best_col is not None else df_src.columns[0]
-    for idx, row in df_src.iterrows():
-        v = row.get(chosen_col_name, '') if chosen_col_name in df_src.columns else ''
-        if pd.isna(v): v = ''
-        s = str(v).strip()
-        norm = normalize_text(s)
-        entries.append((s, norm))
-    out_columns = [chosen_col_name, 'Найдено в файлах'] if df_src.shape[0] and any(isinstance(h, str) for h in df_src.columns) else ['ФИО','Найдено в файлах']
+        chosen_idx = None
+        chosen_col_name = None
+        if args.col_index is not None:
+            chosen_idx = args.col_index
+            if chosen_idx < 0 or chosen_idx >= df_src.shape[1]:
+                print('col_index вне диапазона', file=sys.stderr)
+                return
+            chosen_col_name = df_src.columns[chosen_idx]
+        elif args.col_name:
+            if args.col_name not in df_src.columns:
+                print(f"Колонки с именем '{args.col_name}' нет в исходном файле. Доступные: {list(df_src.columns)}", file=sys.stderr)
+                return
+            chosen_col_name = args.col_name
+        else:
+            hdrs = [str(h).lower() for h in df_src.columns]
+            found = None
+            for i, h in enumerate(hdrs):
+                if 'фио' in h or 'fio' in h:
+                    found = i
+                    break
+            if found is not None:
+                chosen_idx = found
+                chosen_col_name = df_src.columns[chosen_idx]
+            else:
+                chosen_idx = 0
+                chosen_col_name = df_src.columns[0]
+        print('Используем колонку для ФИО:', chosen_col_name)
+        for idx, row in df_src.iterrows():
+            v = row.get(chosen_col_name, '')
+            if pd.isna(v):
+                v = ''
+            s = str(v).strip()
+            norm = normalize_text(s)
+            entries.append((s, norm))
+        if header_present:
+            out_columns = [chosen_col_name, 'Найдено в файлах']
+        else:
+            out_columns = ['ФИО', 'Найдено в файлах']
 
     target_set = set([e[1] for e in entries if e[1]])
     if not target_set:
-        print('Нет нормализованных ФИО для поиска — проверьте исходный файл.')
+        print('Нет нормализованных ФИО для поиска — проверьте исходный файл.', file=sys.stderr)
         return
 
-    exclude = [source_path.resolve(), Path(args.output).resolve()]
-    files = []
-    for p in search_folder.rglob('*.xlsx'):
-        try: rp = str(p.resolve())
-        except: rp = str(p)
-        if rp in [str(x) for x in exclude]: continue
-        files.append(p)
+    print(f'Итого уникальных для поиска: {len(target_set)}')
 
-    found_map = {k:set() for k in target_set}
-    for p in files:
-        matches = scan_file_openpyxl_horizontal(p, target_set, max_seq_length=args.max_seq_length, min_parts=args.min_parts)
+    # collect files
+    exclude = [source_path.resolve(), Path(args.output).resolve()]
+    files = collect_xlsx_files(search_folder, args.recursive, exclude_paths=exclude)
+    print(f'Будет проверено {len(files)} xlsx файлов в {search_folder} (recursive={args.recursive})')
+
+    found_map = {k: set() for k in target_set}
+    for i, p in enumerate(files, 1):
+        print(f'[{i}/{len(files)}] Проверяю: {p}')
+        try:
+            matches = scan_file_openpyxl_horizontal(p, target_set, max_seq_length=args.max_seq_length, min_parts=args.min_parts)
+        except RuntimeError as e:
+            print(e, file=sys.stderr)
+            return
         if matches:
             for m in matches:
                 found_map[m].add(str(p))
 
-    rows = []
+    # prepare output
     if mode == 'three':
-        for vals,norm in entries:
+        rows = []
+        for vals, norm in entries:
             paths = sorted(found_map.get(norm, []))
-            display = '; '.join(paths) if paths else 'ФИО не найдено'
-            rows.append(vals + [display])
+            rows.append(vals + ['; '.join(paths)])
         out_df = pd.DataFrame(rows, columns=out_columns)
     else:
-        for s,norm in entries:
+        rows = []
+        for s, norm in entries:
             paths = sorted(found_map.get(norm, []))
-            display = '; '.join(paths) if paths else 'ФИО не найдено'
-            rows.append([s, display])
+            rows.append([s, '; '.join(paths)])
         out_df = pd.DataFrame(rows, columns=out_columns)
 
+    out_path = Path(args.output)
     try:
-        out_df.to_excel(Path(args.output), index=False)
+        out_df.to_excel(out_path, index=False)
     except Exception as e:
-        print('Ошибка при записи выходного файла:', e)
+        print('Ошибка при записи выходного файла через pandas:', e, file=sys.stderr)
         return
 
-    print('Готово. Результат записан в', Path(args.output))
+    # If tkinter available, show a messagebox with path
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes('-topmost', True)
+        messagebox.showinfo('Готово', f'Результат записан в:\n{out_path.resolve()}')
+        root.destroy()
+    except Exception:
+        print('Готово. Результат записан в', out_path)
+
 
 if __name__ == '__main__':
     main()
